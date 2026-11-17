@@ -1,1431 +1,667 @@
-/* ---------------------------------------------------------------
-   Variables and base
---------------------------------------------------------------- */
-
-:root {
-    color-scheme: dark;
-
-    --page: #111827;
-    --surface: #1f2937;
-    --surface-hover: rgba(55, 65, 81, 0.8);
-    --track: #374151;
-    --line: rgba(255, 255, 255, 0.1);
-    --line-strong: rgba(255, 255, 255, 0.2);
-
-    --text: #ffffff;
-    --muted: rgba(255, 255, 255, 0.6);
-
-    --blue: #2563eb;
-    --blue-edge: #3b82f6;
-    --blue-text: #93c5fd;
-    --fuchsia: #c026d3;
-    --fuchsia-edge: #d946ef;
-    --fuchsia-text: #f0abfc;
-    --teal: #0d9488;
-    --teal-edge: #14b8a6;
-    --teal-text: #5eead4;
-    --rose-edge: #f43f5e;
-    --rose-text: #fda4af;
-    --emerald-edge: #10b981;
-    --emerald-text: #6ee7b7;
-    --orange: #ea580c;
-    --orange-text: #fdba74;
-    --amber: #fbbf24;
-    --amber-text: #fcd34d;
-}
+import { renderInsights, refreshInsights } from './insights.js';
+import { renderSuggestions } from './suggestions.js';
+import { renderLibrary } from './library.js';
+import { revealDetail } from './songDetail.js';
+import { normalizeDate } from './calculatedFields.js';
+import {
+    samePosition,
+    getPageFilters,
+    requestScroll,
+    syncTileStates
+} from './helpers.js';
+import {
+    getSunday,
+    getSundayISO,
+    formatDate,
+    holidaysForService
+} from './dates.js';
 
-* {
-    box-sizing: border-box;
-}
+let songs = [];
+let choirSongs = [];
+let usages = [];
 
-html,
-body {
-    height: 100%;
-    margin: 0;
-}
+export const state = {
+    selectedSongId: null,
+    selectedDate: null,
 
-body {
-    background: var(--page);
-    color: var(--text);
-    font-family: system-ui, "Segoe UI", Arial, sans-serif;
-}
+    yearFilter: false,
 
-button {
-    font: inherit;
-}
+    // Filters are kept per page, e.g. pageFilters.insights and
+    // pageFilters.suggestions. See getPageFilters() in helpers.js.
+    pageFilters: {},
 
-#app {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    height: 100vh;
-    height: 100dvh;
-    padding: 16px;
-}
+    currentPage: 'insights',
+    leaptrotMode: false,
 
-/* ---------------------------------------------------------------
-   Stat tiles
---------------------------------------------------------------- */
-
-.stats-row {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
-}
+    // Set by "See uses": the page to return to ('library' or
+    // 'suggestions'). Insights shows a Back button while it is set.
+    backTo: null,
 
-.stat-tile {
-    min-width: 110px;
-    padding: 12px 16px;
-    border: 1px solid var(--line);
-    border-left-width: 4px;
-    border-radius: 12px;
-    background: var(--surface);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-    color: white;
-    text-align: left;
-    cursor: pointer;
-}
+    // Set by Suggestions' "Load to builder": { songs: [4 titles],
+    // invitation: title }. The Service Builder page reads it.
+    handoff: null
+};
 
-.stat-tile:hover {
-    background: var(--surface-hover);
+export function getData() {
+    return {
+        songs,
+        choirSongs,
+        usages
+    };
 }
 
-.stat-tile.active {
-    background: rgba(55, 65, 81, 0.6);
-}
+document.addEventListener(
+    'DOMContentLoaded',
+    async () => {
 
-.stat-blue {
-    border-left-color: var(--blue-edge);
-}
+        // Wire the controls first so they work even if loading fails.
+        wireEvents();
 
-.stat-teal {
-    border-left-color: var(--teal-edge);
-}
+        try {
 
-.stat-rose {
-    border-left-color: var(--rose-edge);
-}
+            await loadData();
 
-.stat-green {
-    border-left-color: var(--emerald-edge);
-}
+            updateShellTiles();
 
-.stat-blue.active {
-    box-shadow: 0 0 0 2px #60a5fa;
-}
+            renderCurrentPage();
 
-.stat-teal.active {
-    box-shadow: 0 0 0 2px #2dd4bf;
-}
+        }
+        catch (error) {
 
-.stat-rose.active {
-    box-shadow: 0 0 0 2px #fb7185;
-}
+            console.error(error);
 
-.stat-green.active {
-    box-shadow: 0 0 0 2px #34d399;
-}
+            renderLoadError();
+        }
+    }
+);
 
-.tile-label {
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-}
+async function fetchJson(path) {
 
-.stat-blue .tile-label {
-    color: var(--blue-text);
-}
+    const response =
+        await fetch(path);
 
-.stat-teal .tile-label {
-    color: var(--teal-text);
-}
+    if (!response.ok) {
 
-.stat-rose .tile-label {
-    color: var(--rose-text);
-}
+        throw new Error(
+            `Could not load ${path} (${response.status})`
+        );
+    }
 
-.stat-green .tile-label {
-    color: var(--emerald-text);
+    return response.json();
 }
 
-.tile-value {
-    font-size: 30px;
-    font-weight: 700;
-    line-height: 1.2;
-    font-variant-numeric: tabular-nums;
-}
+async function loadData() {
 
-.holiday-note {
-    margin-top: 2px;
-    font-size: 12px;
-    font-weight: 600;
-    color: #fde68a;
+    [
+        songs,
+        choirSongs,
+        usages
+    ] = await Promise.all([
+        fetchJson('Resources/songs.json'),
+        fetchJson('Resources/choirSongs.json'),
+        fetchJson('Resources/usages.json')
+    ]);
 }
 
-/* ---------------------------------------------------------------
-   Dashboard shell
---------------------------------------------------------------- */
-
-.dashboard {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    gap: 12px;
-    min-height: 0;
-}
+// ---------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------
 
-.dashboard-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-}
+function on(id, handler) {
 
-.tabs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
+    document
+        .getElementById(id)
+        ?.addEventListener('click', handler);
 }
 
-/* Tabs: tinted when off, solid when active. Each has its own color. */
-
-.tab {
-    padding: 8px 16px;
-    border: 1px solid rgba(59, 130, 246, 0.4);
-    border-radius: 999px;
-    background: rgba(37, 99, 235, 0.15);
-    color: var(--blue-text);
-    font-size: 16px;
-    font-weight: 600;
-    cursor: pointer;
-}
+function wireEvents() {
 
-.tab:hover {
-    background: rgba(37, 99, 235, 0.25);
+    wireTabs();
+    wireTiles();
+    wireLeaptrot();
+    wireAdminMenu();
 }
 
-.tab.active {
-    border-color: var(--blue);
-    background: var(--blue);
-    color: white;
-}
+function wireTabs() {
 
-.tab-suggestions {
-    border-color: rgba(217, 70, 239, 0.4);
-    background: rgba(192, 38, 211, 0.15);
-    color: var(--fuchsia-text);
-}
+    document
+        .querySelectorAll('[data-tab]')
+        .forEach(button => {
 
-.tab-suggestions:hover {
-    background: rgba(192, 38, 211, 0.25);
+            button.addEventListener(
+                'click',
+                () => showPage(
+                    button.dataset.tab
+                )
+            );
+        });
 }
 
-.tab-suggestions.active {
-    border-color: var(--fuchsia);
-    background: var(--fuchsia);
-    color: white;
-}
+// ---------------------------------------------------------------
+// Page switching
+// ---------------------------------------------------------------
 
-.tab-library {
-    border-color: rgba(20, 184, 166, 0.4);
-    background: rgba(13, 148, 136, 0.15);
-    color: var(--teal-text);
-}
+// Each page remembers how far its lists were scrolled.
+const scrollMemory = {};
 
-.tab-library:hover {
-    background: rgba(13, 148, 136, 0.25);
-}
+function scrollables() {
 
-.tab-library.active {
-    border-color: var(--teal);
-    background: var(--teal);
-    color: white;
+    return [
+        ...document.querySelectorAll('#pageContent *')
+    ];
 }
 
-.toolbar-right {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
+function rememberScroll(page) {
 
-.icon-button,
-.menu-button {
-    padding: 8px 14px;
-    border: 1px solid var(--line-strong);
-    border-radius: 999px;
-    background: transparent;
-    color: white;
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
+    scrollMemory[page] =
+        scrollables().map(el => el.scrollTop);
 }
 
-.icon-button:hover,
-.menu-button:hover {
-    background: rgba(255, 255, 255, 0.05);
-}
+function restoreScroll(page) {
 
-.icon-button.active {
-    border-color: #4f46e5;
-    background: #4f46e5;
-}
+    const saved = scrollMemory[page];
 
-/* ---------------------------------------------------------------
-   Admin menu
---------------------------------------------------------------- */
+    if (!saved) {
+        return;
+    }
 
-.menu-wrapper {
-    position: relative;
-}
+    const els = scrollables();
 
-.dropdown-menu {
-    position: absolute;
-    top: 110%;
-    right: 0;
-    z-index: 20;
-    width: 224px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--surface);
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4);
-    overflow: hidden;
-}
+    saved.forEach((top, index) => {
 
-/* Menu items are buttons */
-
-.menu-item {
-    display: block;
-    width: 100%;
-    padding: 10px 16px;
-    border: 0;
-    background: none;
-    color: inherit;
-    font: inherit;
-    font-size: 14px;
-    text-align: left;
-    cursor: pointer;
+        if (top && els[index]) {
+            els[index].scrollTop = top;
+        }
+    });
 }
 
-.menu-item:hover,
-.menu-item:focus-visible {
-    background: rgba(255, 255, 255, 0.05);
-}
+export function showPage(page) {
 
-.menu-separator {
-    border-top: 1px solid var(--line);
-}
+    // The Back button only lives on Insights.
+    if (page !== 'insights') {
+        state.backTo = null;
+    }
 
-/* ---------------------------------------------------------------
-   Toast
---------------------------------------------------------------- */
-
-.toast {
-    position: fixed;
-    top: 12px;
-    left: 50%;
-    z-index: 50;
-    max-width: 90%;
-    padding: 8px 16px;
-    border: 1px solid #4ade80;
-    border-radius: 8px;
-    background: #16a34a;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4);
-    font-size: 14px;
-    font-weight: 500;
-    transform: translateX(-50%);
-}
+    if (state.currentPage !== page) {
+        rememberScroll(state.currentPage);
+    }
 
-/* ---------------------------------------------------------------
-   Page content and panels
---------------------------------------------------------------- */
-
-.dashboard-content {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-height: 0;
-}
+    state.currentPage =
+        page;
 
-#pageContent {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    gap: 12px;
-    min-height: 0;
-}
+    // Pages without a tab (builder, add song) leave every tab off.
+    document
+        .querySelectorAll('.tab')
+        .forEach(tab =>
+            tab.classList.toggle(
+                'active',
+                tab.dataset.tab === page
+            )
+        );
 
-.panel {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-height: 0;
-    padding: 16px;
-    border-radius: 12px;
-    background: var(--surface);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-    overflow: hidden;
-}
+    renderCurrentPage();
 
-.panel-body {
-    flex: 1;
-    min-height: 0;
-    padding-right: 4px;
-    overflow-x: hidden;
-    overflow-y: auto;
-}
+    restoreScroll(page);
 
-.panel-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 12px;
-    margin-bottom: 12px;
+    // A song card hidden by "See uses" comes back with its page.
+    revealDetail(page);
 }
 
-.panel-header h2 {
-    margin: 0;
-    font-size: 18px;
-    font-weight: 600;
-}
+// "See uses" on a song card: open Insights with that song selected.
+export function seeUses(songId, from) {
 
-.panel-subtitle {
-    margin-top: 2px;
-    font-size: 14px;
-    color: var(--muted);
-}
+    const filters = getPageFilters('insights');
 
-/* ---------------------------------------------------------------
-   Filters
---------------------------------------------------------------- */
-
-.filter-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-}
+    filters.positionFilter = null;
+    filters.tempoFilter = null;
+    filters.yearOnly = false;
+    filters.dateSel = null;
+    filters.selectedSongId = songId;
+    filters.selectedFrom = 'most';
 
-.filter-chip {
-    padding: 4px 12px;
-    border: 1px solid var(--line-strong);
-    border-radius: 999px;
-    background: transparent;
-    color: white;
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-}
+    state.backTo = from;
 
-.filter-chip:hover {
-    background: rgba(255, 255, 255, 0.05);
-}
+    // Show the song in Most Used, not a remembered scroll position.
+    scrollMemory.insights = null;
 
-.filter-chip.active {
-    border-color: var(--blue);
-    background: var(--blue);
-}
+    requestScroll('recent');
 
-.filter-chip.faster.active {
-    border-color: #f97316;
-    background: #f97316;
+    showPage('insights');
 }
 
-.filter-chip.slower.active {
-    border-color: #0284c7;
-    background: #0284c7;
-}
+export function goBack() {
 
-/* Clear buttons are amber, like the dashboard's. */
-
-.clear-button {
-    padding: 4px 12px;
-    border: 1px solid var(--amber);
-    border-radius: 999px;
-    background: transparent;
-    color: var(--amber-text);
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-}
+    const to = state.backTo;
 
-.clear-button:hover {
-    background: rgba(255, 255, 255, 0.05);
-}
+    if (!to) {
+        return;
+    }
 
-/* Neutral variants: "Show more" and the detail close button */
+    const filters = getPageFilters('insights');
 
-.more-row .clear-button,
-.detail-card .clear-button {
-    border-color: var(--line-strong);
-    color: white;
-}
+    filters.selectedSongId = null;
+    filters.selectedFrom = null;
 
-/* ---------------------------------------------------------------
-   Most used list
---------------------------------------------------------------- */
-
-.song-row {
-    display: grid;
-    grid-template-columns: 24px 224px 1fr 36px;
-    align-items: center;
-    gap: 12px;
-    padding: 6px 4px;
-    border-radius: 8px;
-}
+    state.backTo = null;
 
-.rank {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    font-size: 12px;
-    font-weight: 700;
+    showPage(to);
 }
 
-.rank-gold {
-    background: #fbbf24;
-    color: #451a03;
-}
+// Stat tiles. Only the Insights page uses the year and Sunday
+// tiles as filters; on other pages they do nothing.
+function wireTiles() {
 
-.rank-silver {
-    background: #cbd5e1;
-    color: #1e293b;
-}
+    on('tileSongs', () => showPage('library'));
 
-.rank-bronze {
-    background: #fdba74;
-    color: #431407;
-}
+    on('tileYear', () =>
+        changeInsightsFilter(filters => {
+            filters.yearOnly = !filters.yearOnly;
+        })
+    );
 
-.rank-normal {
-    background: var(--track);
-    opacity: 0.8;
-}
+    on('tileRecent', () =>
+        changeInsightsFilter(filters => {
+            filters.dateSel =
+                filters.dateSel === 'last'
+                    ? null
+                    : 'last';
+        })
+    );
 
-.song-title {
-    min-width: 0;
-    font-size: 14px;
-    font-weight: 500;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    overflow: hidden;
+    on('tileUpcoming', () =>
+        changeInsightsFilter(filters => {
+            filters.dateSel =
+                filters.dateSel === 'next'
+                    ? null
+                    : 'next';
+        })
+    );
 }
 
-.bar {
-    height: 16px;
-    border-radius: 999px;
-    background: var(--track);
-    overflow: hidden;
-}
+function changeInsightsFilter(change) {
 
-.bar-fill {
-    height: 100%;
-    min-width: 3%;
-    border-radius: 999px;
-    background: linear-gradient(90deg, #3b82f6, #6366f1);
-}
+    if (state.currentPage !== 'insights') {
+        return;
+    }
 
-.song-count {
-    font-size: 14px;
-    font-weight: 600;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-}
+    change(getPageFilters('insights'));
 
-/* ---------------------------------------------------------------
-   Recently used list
---------------------------------------------------------------- */
-
-.recent-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    padding: 8px;
-    border-radius: 8px;
+    refreshInsights();
 }
 
-.recent-title {
-    font-size: 14px;
-    font-weight: 500;
-}
+function wireLeaptrot() {
 
-.recent-position {
-    font-size: 12px;
-    color: var(--muted);
-}
+    const button =
+        document.getElementById('leaptrotButton');
 
-.recent-date {
-    text-align: right;
-}
+    if (!button) {
+        return;
+    }
 
-.recent-date-main {
-    font-size: 14px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-}
+    button.setAttribute('aria-pressed', 'false');
 
-.recent-date-sub {
-    font-size: 12px;
-    color: var(--muted);
-}
+    button.addEventListener('click', () => {
 
-/* ---------------------------------------------------------------
-   Selectable song rows (Insights, Suggestions)
---------------------------------------------------------------- */
+        state.leaptrotMode =
+            !state.leaptrotMode;
 
-.selectable {
-    cursor: pointer;
-}
+        button.classList.toggle(
+            'active',
+            state.leaptrotMode
+        );
 
-.selectable:hover {
-    background: rgba(255, 255, 255, 0.05);
+        button.setAttribute(
+            'aria-pressed',
+            String(state.leaptrotMode)
+        );
+    });
 }
 
-.selectable:focus-visible {
-    outline: 2px solid var(--amber);
-    outline-offset: -2px;
-}
+// ---------------------------------------------------------------
+// Admin Tools menu
+// ---------------------------------------------------------------
 
-.song-row.selected,
-.recent-item.selected {
-    background: rgba(251, 191, 36, 0.15);
-    box-shadow: inset 0 0 0 1px var(--amber);
-}
+const ADMIN_ACTIONS = {
+    'service-builder': () => showPage('builder'),
+    'add-song': () => showPage('addsong'),
+    'export-database': () => notify('Export Database is not built yet.'),
+    'remove-records': () => notify('Remove Records is not built yet.'),
+    'color-theme': () => notify('Color Theme is not built yet.')
+};
 
-.song-row.selected .bar-fill {
-    background: linear-gradient(90deg, #fbbf24, #f97316);
-}
+function setMenuOpen(open) {
 
-/* A heavier line between groups of different dates. */
-
-.recent-item.new-date {
-    margin-top: 8px;
-    padding-top: 12px;
-    border-top: 2px solid rgba(255, 255, 255, 0.3);
-    border-top-left-radius: 0;
-    border-top-right-radius: 0;
-}
+    document
+        .getElementById('adminMenu')
+        ?.classList.toggle('hidden', !open);
 
-/* ---------------------------------------------------------------
-   Song Library
---------------------------------------------------------------- */
-
-/* Praise Team / Choir switcher */
-
-.library-tabs {
-    display: flex;
-    gap: 4px;
-    width: fit-content;
-    margin: 0 auto;
-    padding: 4px;
-    border: 1px solid var(--line-strong);
-    border-radius: 999px;
-    background: rgba(17, 24, 39, 0.4);
+    document
+        .getElementById('adminButton')
+        ?.setAttribute('aria-expanded', String(open));
 }
 
-.library-tab {
-    padding: 6px 16px;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-}
+function isMenuOpen() {
 
-.library-tab[data-libtab="praise"] {
-    color: var(--teal-text);
-}
+    const menu =
+        document.getElementById('adminMenu');
 
-.library-tab[data-libtab="choir"] {
-    color: var(--orange-text);
+    return Boolean(menu) &&
+        !menu.classList.contains('hidden');
 }
 
-.library-tab:hover {
-    background: rgba(255, 255, 255, 0.05);
-}
+function wireAdminMenu() {
 
-.library-tab.active.praise {
-    background: var(--teal);
-    color: white;
-}
+    const button =
+        document.getElementById('adminButton');
 
-.library-tab.active.choir {
-    background: var(--orange);
-    color: white;
-}
+    const menu =
+        document.getElementById('adminMenu');
 
-/* Panel and controls */
+    if (!button || !menu) {
+        return;
+    }
 
-.library-panel {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-}
+    button.addEventListener('click', () =>
+        setMenuOpen(!isMenuOpen())
+    );
 
-.lib-select,
-.lib-search {
-    padding: 6px 12px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: rgba(17, 24, 39, 0.6);
-    color: white;
-    font-size: 14px;
-}
+    menu
+        .querySelectorAll('[data-action]')
+        .forEach(item => {
 
-.lib-select {
-    max-width: 200px;
-    cursor: pointer;
-}
+            item.addEventListener('click', () => {
 
-.lib-select:focus,
-.lib-search:focus {
-    border-color: var(--blue-edge);
-    outline: none;
-}
+                setMenuOpen(false);
 
-.lib-search {
-    width: 208px;
-}
+                ADMIN_ACTIONS[item.dataset.action]?.();
+            });
+        });
 
-.lib-search::placeholder {
-    color: rgba(255, 255, 255, 0.3);
-}
+    // Click outside closes the menu.
+    document.addEventListener('click', event => {
 
-/* Table */
-
-.table-wrap {
-    flex: 1;
-    min-height: 0;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: rgba(17, 24, 39, 0.3);
-    overflow: auto;
-}
+        if (
+            isMenuOpen() &&
+            !event.target.closest('.menu-wrapper')
+        ) {
+            setMenuOpen(false);
+        }
+    });
 
-.lib-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 14px;
-    text-align: left;
-}
+    // Escape closes the menu and returns focus to the button.
+    document.addEventListener('keydown', event => {
 
-.lib-table th {
-    position: sticky;
-    top: 0;
-    padding: 10px 12px;
-    background: var(--surface);
-    box-shadow: 0 1px 0 var(--line);
-    font-weight: 600;
-    white-space: nowrap;
-    user-select: none;
-    cursor: pointer;
-}
+        if (event.key === 'Escape' && isMenuOpen()) {
 
-.lib-table td {
-    padding: 10px 12px;
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
-    color: rgba(255, 255, 255, 0.7);
-}
+            setMenuOpen(false);
 
-.lib-table td:first-child {
-    color: white;
+            button.focus();
+        }
+    });
 }
 
-.lib-table tbody tr {
-    cursor: pointer;
-}
+// A short message at the bottom of the screen.
+let toastTimer = 0;
 
-.lib-table tbody tr:hover {
-    background: rgba(59, 130, 246, 0.1);
-}
+function notify(message) {
 
-.lib-table tbody tr.selected {
-    background: rgba(251, 191, 36, 0.15);
-}
+    let toast =
+        document.getElementById('toast');
 
-.title-link {
-    padding: 0;
-    border: 0;
-    background: none;
-    color: inherit;
-    font: inherit;
-    font-weight: 600;
-    text-align: left;
-    cursor: pointer;
-}
+    if (!toast) {
 
-.title-link:hover {
-    color: var(--blue-text);
-}
+        toast =
+            document.createElement('div');
 
-.title-link:focus-visible {
-    outline: 2px solid var(--amber);
-    border-radius: 4px;
-}
+        toast.id = 'toast';
+        toast.className = 'toast hidden';
+        toast.setAttribute('role', 'status');
 
-.clamp {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    max-width: 320px;
-    overflow: hidden;
-}
+        document.body.appendChild(toast);
+    }
 
-.empty-note {
-    padding: 24px;
-    text-align: center;
-    opacity: 0.6;
-}
+    toast.textContent =
+        message;
 
-.more-row {
-    padding: 12px;
-    text-align: center;
-}
+    toast.classList.remove('hidden');
 
-/* Tags */
-
-.key-tag {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 6px;
-    background: rgba(59, 130, 246, 0.2);
-    color: #bfdbfe;
-    font-weight: 500;
-}
+    clearTimeout(toastTimer);
 
-.tempo-tag {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 600;
+    toastTimer = setTimeout(
+        () => toast.classList.add('hidden'),
+        3500
+    );
 }
 
-.faster-tag {
-    background: rgba(249, 115, 22, 0.2);
-    color: #fed7aa;
-}
+// ---------------------------------------------------------------
+// Pages
+// ---------------------------------------------------------------
 
-.slower-tag {
-    background: rgba(14, 165, 233, 0.2);
-    color: #bae6fd;
-}
+function renderCurrentPage() {
 
-.choir-tag,
-.box-link {
-    display: inline-block;
-    padding: 2px 8px;
-    border: 0;
-    border-radius: 6px;
-    background: rgba(249, 115, 22, 0.2);
-    color: #fed7aa;
-    font-size: 12px;
-    font-weight: 500;
-}
+    switch (state.currentPage) {
 
-.box-link {
-    cursor: pointer;
-}
+        case 'insights':
+            renderInsights();
+            break;
 
-.box-link:hover {
-    background: rgba(249, 115, 22, 0.3);
-    text-decoration: underline;
-}
+        case 'suggestions':
+            renderSuggestions();
+            break;
 
-/* ---------------------------------------------------------------
-   Song detail card (Song Library, Choir Library, Suggestions)
---------------------------------------------------------------- */
-
-.detail-overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 50;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 16px;
-    background: rgba(0, 0, 0, 0.6);
-}
+        case 'library':
+            renderLibrary();
+            break;
 
-.detail-card {
-    display: flex;
-    flex-direction: column;
-    width: min(560px, 100%);
-    max-height: 100%;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 16px;
-    background: #1f2937;
-    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-}
+        case 'builder':
+            renderPlaceholder(
+                'Service Builder'
+            );
+            break;
 
-.detail-card:focus {
-    outline: none;
-}
+        case 'addsong':
+            renderPlaceholder(
+                'Add a New Song'
+            );
+            break;
 
-.detail-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-}
+        default:
+            renderPlaceholder(
+                'Coming Soon'
+            );
+    }
 
-.detail-head h2 {
-    margin: 0;
-    min-width: 0;
-    font-size: 20px;
-    font-weight: 600;
-    overflow-wrap: anywhere;
+    // The year and Sunday tiles only act as filters on Insights.
+    syncTileStates(
+        state.currentPage === 'insights'
+            ? getPageFilters('insights')
+            : null
+    );
 }
 
-.detail-x {
-    flex: none;
-    min-width: 44px;
-    min-height: 44px;
-    margin: -8px;
-    border: 0;
-    border-radius: 6px;
-    background: none;
-    color: inherit;
-    font-size: 18px;
-    cursor: pointer;
-}
+export function refreshPage() {
 
-.detail-x:hover {
-    background: rgba(255, 255, 255, 0.05);
-}
+    updateShellTiles();
 
-.detail-body {
-    flex: 1;
-    overflow: auto;
-    padding: 16px;
+    renderCurrentPage();
 }
 
-.detail-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-    margin: 0;
-}
+function renderPlaceholder(title) {
 
-.detail-field {
-    min-width: 0;
-}
+    const pageContent =
+        document.getElementById(
+            'pageContent'
+        );
 
-.detail-field.wide {
-    grid-column: 1 / -1;
-}
+    if (!pageContent) {
+        return;
+    }
 
-.detail-field dt {
-    margin-bottom: 4px;
-    font-size: 12px;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.5);
-}
+    pageContent.innerHTML = `
+        <section class="panel">
 
-.detail-field dd {
-    margin: 0;
-    font-size: 16px;
-    overflow-wrap: anywhere;
-}
+            <div class="panel-header">
 
-.detail-field dd.pre {
-    white-space: pre-wrap;
-}
+                <div>
+                    <h2>${title}</h2>
+                </div>
 
-.detail-pills {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
+            </div>
 
-.detail-pill {
-    padding: 2px 10px;
-    border-radius: 999px;
-    background: rgba(59, 130, 246, 0.2);
-    color: #dbeafe;
-    font-size: 14px;
-}
+            <div class="panel-body">
+                Not implemented yet.
+            </div>
 
-.detail-foot {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
-    padding: 16px;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
+        </section>
+    `;
 }
 
-.detail-button,
-.back-button {
-    min-height: 44px;
-    padding: 8px 16px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 6px;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    font-weight: 500;
-    cursor: pointer;
-}
+function renderLoadError() {
 
-.detail-button:hover,
-.back-button:hover {
-    background: rgba(255, 255, 255, 0.05);
-}
+    const pageContent =
+        document.getElementById(
+            'pageContent'
+        );
 
-.detail-x:focus-visible,
-.detail-button:focus-visible,
-.back-button:focus-visible {
-    outline: 2px solid #fbbf24;
-    outline-offset: 2px;
+    if (!pageContent) {
+        return;
+    }
+
+    pageContent.innerHTML = `
+        <section class="panel">
+
+            <div class="panel-header">
+
+                <div>
+                    <h2>Could not load data</h2>
+                </div>
+
+            </div>
+
+            <div class="panel-body">
+                The song data files could not be loaded.
+                Check that songs.json, choirSongs.json and
+                usages.json are in the Resources folder,
+                then reload the page.
+            </div>
+
+        </section>
+    `;
 }
+
+// ---------------------------------------------------------------
+// Shell tiles
+// ---------------------------------------------------------------
+
+function setText(id, text) {
 
-@media (max-width: 640px) {
+    const el =
+        document.getElementById(id);
 
-    .detail-grid {
-        grid-template-columns: 1fr;
+    if (el) {
+        el.textContent = text;
     }
 }
 
-/* ---------------------------------------------------------------
-   Insights: Back button and the "not in this list" row
---------------------------------------------------------------- */
+function updateShellTiles() {
 
-.back-bar {
-    margin-bottom: 8px;
+    updateSongCountTile();
+    updateSongsThisYearTile();
+    updateRecentSundayTile();
+    updateNextSundayTile();
+    updateHolidayNotice();
 }
 
-.song-row.missing {
-    grid-template-columns: 24px 224px 1fr;
+function updateSongCountTile() {
+
+    const ids = new Set();
+
+    usages.forEach(u => {
+
+        if (
+            u.songId &&
+            !samePosition(u.position, 'Anthem')
+        ) {
+
+            ids.add(u.songId);
+        }
+    });
+
+    setText('songCount', ids.size);
 }
 
-.missing-note {
-    font-size: 14px;
-    opacity: 0.7;
+function updateSongsThisYearTile() {
+
+    const currentYear =
+        new Date().getFullYear();
+
+    const ids =
+        new Set();
+
+    usages.forEach(u => {
+
+        const date =
+            normalizeDate(u.dateUsed);
+
+        if (!date || !u.songId) {
+            return;
+        }
+
+        if (
+            Number(date.slice(0, 4))
+            === currentYear
+        ) {
+
+            ids.add(u.songId);
+        }
+    });
+
+    setText('yearCount', ids.size);
 }
 
-/* ---------------------------------------------------------------
-   Choir Library accents
---------------------------------------------------------------- */
+function updateRecentSundayTile() {
 
-.lib-table.choir tbody tr:hover {
-    background: rgba(249, 115, 22, 0.1);
+    setText(
+        'recentSunday',
+        formatDate(
+            getSundayISO('last')
+        )
+    );
 }
 
-.lib-table.choir tbody tr.selected {
-    background: rgba(251, 146, 60, 0.15);
+function updateNextSundayTile() {
+
+    setText(
+        'nextSunday',
+        formatDate(
+            getSundayISO('next')
+        )
+    );
 }
 
-.clear-button.choir {
-    color: #fdba74;
-}
+function updateHolidayNotice() {
 
-/* ---------------------------------------------------------------
-   Keyboard focus
---------------------------------------------------------------- */
+    const box =
+        document.getElementById(
+            'holidayNotice'
+        );
 
-.tab:focus-visible,
-.stat-tile:focus-visible,
-.filter-chip:focus-visible,
-.icon-button:focus-visible,
-.menu-button:focus-visible,
-.clear-button:focus-visible,
-.library-tab:focus-visible {
-    outline: 2px solid var(--amber);
-    outline-offset: 2px;
-}
-
-/* ---------------------------------------------------------------
-   Utilities
---------------------------------------------------------------- */
-
-.hidden {
-    display: none !important;
-}
-
-/* ---------------------------------------------------------------
-   Responsive
---------------------------------------------------------------- */
-
-@media (max-width: 900px) {
-
-    #app {
-        height: auto;
-        min-height: 100vh;
+    if (!box) {
+        return;
     }
 
-    .song-row {
-        grid-template-columns: 24px 1fr 36px;
-    }
+    box.replaceChildren();
 
-    .song-row .bar {
-        grid-column: 1 / -1;
-        order: 5;
-    }
+    holidaysForService(
+        getSunday('next')
+    ).forEach(holiday => {
 
-    .panel-header {
-        flex-direction: column;
-    }
+        const line =
+            document.createElement('div');
 
-    .dashboard {
-        flex: none;
-    }
+        line.textContent =
+            `${holiday.name} · ${holiday.label}`;
 
-    .dashboard-content,
-    #pageContent {
-        display: flex;
-    }
-
-    .panel {
-        flex: none;
-        min-height: 500px;
-    }
-
-    .table-wrap {
-        max-height: 65vh;
-    }
-}
-
-@media (max-width: 768px) {
-
-    .stats-row {
-        grid-template-columns: 1fr 1fr;
-    }
-}
-
-@media (prefers-reduced-motion: reduce) {
-
-    * {
-        transition: none !important;
-        scroll-behavior: auto !important;
-    }
-}
-
-/* ---------------------------------------------------------------
-   Suggestions
---------------------------------------------------------------- */
-
-/* Quick Order of Service cards */
-
-.sug-lists {
-    flex: 0 0 auto;
-    padding: 4px;
-    margin-bottom: 8px;
-}
-
-.sug-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-}
-
-.sug-alert {
-    margin-bottom: 8px;
-    font-size: 14px;
-    color: #fca5a5;
-}
-
-.sug-card {
-    min-width: 0;
-    overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 12px;
-    background: linear-gradient(135deg, #374151, rgba(55, 65, 81, 0.6));
-}
-
-.sug-card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 6px 12px;
-    background: rgba(37, 99, 235, 0.2);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.sug-card-header h3 {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 600;
-}
-
-.sug-card-actions {
-    display: flex;
-    gap: 8px;
-}
-
-.sug-button {
-    padding: 4px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 6px;
-    background: transparent;
-    color: inherit;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-}
-
-.sug-button:hover {
-    background: rgba(255, 255, 255, 0.1);
-}
-
-.sug-button.primary {
-    border-color: #2563eb;
-    background: #2563eb;
-}
-
-.sug-button.primary:hover {
-    background: #1d4ed8;
-}
-
-.sug-slots {
-    display: flex;
-    flex-direction: column;
-    margin: 0;
-    padding: 4px 0;
-    list-style: none;
-}
-
-.sug-slot {
-    display: flex;
-    align-items: center;
-}
-
-.sug-slot:hover {
-    background: rgba(255, 255, 255, 0.05);
-}
-
-.sug-slot.locked {
-    background: rgba(251, 191, 36, 0.1);
-}
-
-.sug-slot-main {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 2px 4px 2px 12px;
-    border: 0;
-    background: none;
-    color: inherit;
-    text-align: left;
-    cursor: pointer;
-}
-
-.sug-badge {
-    flex: none;
-    width: 80px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: rgba(37, 99, 235, 0.8);
-    font-size: 12px;
-    font-weight: 600;
-    text-align: center;
-}
-
-.sug-slot-title {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 14px;
-    font-weight: 500;
-}
-
-.sug-slot-label {
-    flex: none;
-    width: 144px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 12px;
-    opacity: 0.6;
-}
-
-.sug-slot-tempo {
-    flex: none;
-    width: 80px;
-    text-align: right;
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-    opacity: 0.7;
-}
-
-.sug-slot-sig {
-    flex: none;
-    width: 32px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 1;
-}
-
-.sug-slot-key {
-    flex: none;
-    width: 48px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    background: rgba(255, 255, 255, 0.1);
-    font-size: 12px;
-    text-align: center;
-}
-
-.sug-lock {
-    flex: none;
-    padding: 2px 8px;
-    border: 0;
-    background: none;
-    font-size: 14px;
-    cursor: pointer;
-    opacity: 0.4;
-}
-
-.sug-lock:hover,
-.sug-lock.on {
-    opacity: 1;
-}
-
-.sug-empty {
-    padding: 2px 12px;
-    font-size: 14px;
-    opacity: 0.6;
-}
-
-.sug-slot-main:focus-visible,
-.sug-lock:focus-visible,
-.sug-button:focus-visible {
-    outline: 2px solid #fbbf24;
-    outline-offset: -2px;
-}
-
-/* Song suggestions table */
-
-.sug-panel .panel-header {
-    align-items: center;
-    margin-bottom: 12px;
-}
-
-.sug-panel .table-wrap {
-    flex: 1;
-    min-height: 0;
-    max-height: none;
-}
-
-.sug-panel .filter-row {
-    align-items: center;
-}
-
-.sug-toggle.active {
-    background: #2563eb;
-    border-color: #2563eb;
-}
-
-.hot-key {
-    font-size: 12px;
-    opacity: 0.6;
-}
-
-.sug-title {
-    font-weight: 600;
-}
-
-.lib-table td.num {
-    font-variant-numeric: tabular-nums;
-}
-
-.lib-table td.nowrap {
-    white-space: nowrap;
-}
-
-.lib-table td:not(.sug-title) {
-    color: rgba(255, 255, 255, 0.7);
-}
-
-@media (max-width: 900px) {
-
-    .sug-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .sug-slot-label {
-        display: none;
-    }
-}
-
-/* ---------------------------------------------------------------
-   Song detail card: editing
---------------------------------------------------------------- */
-
-.detail-spacer {
-    flex: 1;
-}
-
-.detail-field label {
-    display: block;
-    margin-bottom: 4px;
-    font-size: 12px;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.5);
-}
-
-.detail-field input,
-.detail-field textarea {
-    box-sizing: border-box;
-    width: 100%;
-    min-height: 40px;
-    padding: 8px 10px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 6px;
-    background: rgba(0, 0, 0, 0.25);
-    color: inherit;
-    font: inherit;
-}
-
-.detail-field textarea {
-    resize: vertical;
-}
-
-.detail-field input:focus,
-.detail-field textarea:focus {
-    outline: 2px solid #fbbf24;
-    outline-offset: 1px;
-}
-
-.detail-button.primary {
-    border-color: #3b82f6;
-    background: #3b82f6;
-    color: #fff;
-}
-
-.detail-button.primary:hover {
-    background: #2563eb;
-}
-
-.detail-status {
-    padding: 0 16px;
-    font-size: 14px;
-    color: #86efac;
-}
-
-.detail-status:empty {
-    display: none;
-}
-
-.detail-status.bad {
-    color: #fca5a5;
+        box.appendChild(line);
+    });
 }
