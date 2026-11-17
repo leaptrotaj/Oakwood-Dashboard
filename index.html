@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Oakwood Music Library</title>
+
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div id="app">
+
+    <div class="stats-row">
+
+        <button type="button" id="tileSongs" class="stat-tile stat-blue">
+            <div class="tile-label">
+                NUMBER OF PRAISE TEAM SONGS
+            </div>
+            <div id="songCount" class="tile-value">
+                --
+            </div>
+        </button>
+
+        <button type="button" id="tileYear" class="stat-tile stat-teal">
+            <div id="yearLabel" class="tile-label">
+                SONGS USED THIS YEAR
+            </div>
+            <div id="yearCount" class="tile-value">
+                --
+            </div>
+        </button>
+
+        <button type="button" id="tileRecent" class="stat-tile stat-rose">
+            <div class="tile-label">
+                MOST RECENT SUNDAY
+            </div>
+            <div id="recentSunday" class="tile-value">
+                --
+            </div>
+        </button>
+
+        <button type="button" id="tileUpcoming" class="stat-tile stat-green">
+            <div class="tile-label">
+                NEXT UPCOMING SUNDAY
+            </div>
+            <div id="nextSunday" class="tile-value">
+                --
+            </div>
+
+            <div id="holidayNotice" class="holiday-note"></div>
+        </button>
+
+    </div>
+
+    <section class="dashboard">
+
+        <div class="dashboard-toolbar">
+
+            <div class="tabs">
+
+                <button type="button" class="tab active" data-tab="insights">
+                    Insights
+                </button>
+
+                <button type="button" class="tab tab-suggestions" data-tab="suggestions">
+                    Suggestions
+                </button>
+
+                <button type="button" class="tab tab-library" data-tab="library">
+                    Song Library
+                </button>
+
+            </div>
+
+            <div class="toolbar-right">
+
+                <button type="button"
+                        id="leaptrotButton"
+                        class="icon-button"
+                        title="Leaptrot mode"
+                        aria-label="Leaptrot mode">
+                    L
+                </button>
+
+                <div class="menu-wrapper">
+
+                    <button type="button"
+                            id="adminButton"
+                            class="menu-button"
+                            aria-haspopup="true"
+                            aria-expanded="false"
+                            aria-controls="adminMenu">
+                        Admin Tools ▼
+                    </button>
+
+                    <div id="adminMenu"
+                         class="dropdown-menu hidden">
+
+                        <button type="button" class="menu-item" data-action="service-builder">
+                            Service Builder
+                        </button>
+
+                        <button type="button" class="menu-item" data-action="add-song">
+                            Add a New Song
+                        </button>
+
+                        <button type="button" class="menu-item" data-action="export-database">
+                            Export Database
+                        </button>
+
+                        <button type="button" class="menu-item" data-action="remove-records">
+                            Remove Records
+                        </button>
+
+                        <div class="menu-separator"></div>
+
+                        <button type="button" class="menu-item" data-action="color-theme">
+                            Color Theme
+                        </button>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+        <main class="dashboard-content">
+
+            <div id="pageContent"></div>
+
+        </main>
+
+    </section>
+
+</div>
+
+<script type="module" src="js/app.js"></script>
+
+</body>
+</html>
